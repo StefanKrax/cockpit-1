@@ -9,14 +9,47 @@
 // for external hardware libraries.
 
 #include <memory>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 #include "sensesp.h"
 #include "sensesp/sensors/analog_input.h"
 #include "sensesp/sensors/digital_input.h"
+#include "sensesp/sensors/digital_output.h"
 #include "sensesp/sensors/sensor.h"
 #include "sensesp/signalk/signalk_output.h"
 #include "sensesp/system/lambda_consumer.h"
 #include "sensesp_app_builder.h"
+#include "sensesp/transforms/linear.h"
+#include "sensesp/signalk/signalk_value_listener.h"
+#include "sensesp/signalk/signalk_listener.h"
+#include "sensesp/system/rgb_led.h"
+#include "sensesp/controllers/smart_switch_controller.h"
+#include "sensesp/transforms/click_type.h"
+#include "sensesp/transforms/debounce.h"
+#include "sensesp/transforms/press_repeater.h"
+#include "sensesp/transforms/repeat.h"
+#include "sensesp/signalk/signalk_put_request_listener.h"
+
+#define LED_ON_COLOR 0x004700
+#define LED_OFF_COLOR 0x261900
+
+#define STDBUTTON_PIN D10
+#define STD_LED_R_PIN A1
+#define STD_LED_G_PIN A2
+#define STD_LED_B_PIN A3
+#define PWRBUTTON_PIN D3
+#define PWR_LED_R_PIN D1
+#define PWR_LED_G_PIN D2
+#define PWR_LED_B_PIN D3
+#define POTI_PIN A0
+#define BUZZER_PIN D4
+
+#define PIN_RELAY D5
+// PIN D5 is free
+
+
 
 using namespace sensesp;
 
@@ -28,7 +61,7 @@ void setup() {
   SensESPAppBuilder builder;
   sensesp_app = (&builder)
                     // Set a custom hostname for the app.
-                    ->set_hostname("my-sensesp-project")
+                    ->set_hostname("cockpit-1")
                     // Optionally, hard-code the WiFi and Signal K server
                     // settings. This is normally not needed.
                     //->set_wifi_client("My WiFi SSID", "my_wifi_password")
@@ -36,103 +69,91 @@ void setup() {
                     //->set_sk_server("192.168.10.3", 80)
                     ->get_app();
 
-  // GPIO number to use for the analog input
-  const uint8_t kAnalogInputPin = 36;
-  // Define how often (in milliseconds) new samples are acquired
-  const unsigned int kAnalogInputReadInterval = 500;
-  // Define the produced value at the maximum input voltage (3.3V).
-  // A value of 3.3 gives output equal to the input voltage.
-  const float kAnalogInputScale = 3.3;
 
-  // Create a new Analog Input Sensor that reads an analog input pin
-  // periodically.
-  auto analog_input = std::make_shared<AnalogInput>(
-      kAnalogInputPin, kAnalogInputReadInterval, "", kAnalogInputScale);
+  ////////////////POTI////////////////
+  //analogSetAttenuation(ADC_11db);
+  const char* poti_path = "environment.inside.engineRoom.throttle";
+  const char* poti_sk_path = "/engine/throttle/analog_in";
+  const char* linear_config_path = "/engine/throttle/linear";
+  unsigned int read_delay = 5000;
 
-  // Add an observer that prints out the current value of the analog input
-  // every time it changes.
-  analog_input->attach([analog_input]() {
-    debugD("Analog input value: %f", analog_input->get());
-  });
+  auto input_calibration = new Linear(0.00137, 1023, linear_config_path);
+  auto* poti_input = new AnalogInput(POTI_PIN, read_delay, poti_sk_path);
 
-  // Set GPIO pin 15 to output and toggle it every 650 ms
-
-  const uint8_t kDigitalOutputPin = 15;
-  const unsigned int kDigitalOutputInterval = 650;
-  pinMode(kDigitalOutputPin, OUTPUT);
-  event_loop()->onRepeat(kDigitalOutputInterval, [kDigitalOutputPin]() {
-    digitalWrite(kDigitalOutputPin, !digitalRead(kDigitalOutputPin));
-  });
-
-  // Read GPIO 14 every time it changes
-
-  const uint8_t kDigitalInput1Pin = 14;
-  auto digital_input1 = std::make_shared<DigitalInputChange>(
-      kDigitalInput1Pin, INPUT_PULLUP, CHANGE);
-
-  // Connect the digital input to a lambda consumer that prints out the
-  // value every time it changes.
-
-  // Test this yourself by connecting pin 15 to pin 14 with a jumper wire and
-  // see if the value changes!
-
-  auto digital_input1_consumer = std::make_shared<LambdaConsumer<bool>>(
-      [](bool input) { debugD("Digital input value changed: %d", input); });
-
-  digital_input1->connect_to(digital_input1_consumer);
-
-  // Create another digital input, this time with RepeatSensor. This approach
-  // can be used to connect external sensor library to SensESP!
-
-  const uint8_t kDigitalInput2Pin = 13;
-  const unsigned int kDigitalInput2Interval = 1000;
-
-  // Configure the pin. Replace this with your custom library initialization
-  // code!
-  pinMode(kDigitalInput2Pin, INPUT_PULLUP);
-
-  // Define a new RepeatSensor that reads the pin every 100 ms.
-  // Replace the lambda function internals with the input routine of your custom
-  // library.
-
-  // Again, test this yourself by connecting pin 15 to pin 13 with a jumper
-  // wire and see if the value changes!
-
-  auto digital_input2 = std::make_shared<RepeatSensor<bool>>(
-      kDigitalInput2Interval,
-      [kDigitalInput2Pin]() { return digitalRead(kDigitalInput2Pin); });
-
-  // Connect the analog input to Signal K output. This will publish the
-  // analog input value to the Signal K server every time it changes.
-  auto aiv_metadata = std::make_shared<SKMetadata>("V", "Analog input voltage");
-  auto aiv_sk_output = std::make_shared<SKOutput<float>>(
-      "sensors.analog_input.voltage",   // Signal K path
-      "/Sensors/Analog Input/Voltage",  // configuration path, used in the
-                                        // web UI and for storing the
-                                        // configuration
-      aiv_metadata
-  );
-
-  ConfigItem(aiv_sk_output)
-      ->set_title("Analog Input Voltage SK Output Path")
-      ->set_description("The SK path to publish the analog input voltage")
+  ConfigItem(poti_input)
+      ->set_title("Throttle input")
+      ->set_description("Throttle read interval")
       ->set_sort_order(100);
 
-  analog_input->connect_to(aiv_sk_output);
+  ConfigItem(input_calibration)
+      ->set_title("Throttle calibration")
+      ->set_description("Throttle calibration")
+      ->set_sort_order(101);
 
-  // Connect digital input 2 to Signal K output.
-  auto di2_metadata = std::make_shared<SKMetadata>("", "Digital input 2 value");
-  auto di2_sk_output = std::make_shared<SKOutput<bool>>(
-      "sensors.digital_input2.value",    // Signal K path
-      "/Sensors/Digital Input 2/Value",  // configuration path
-      di2_metadata
-  );
+  poti_input->connect_to(input_calibration);
+  input_calibration->connect_to(new SKOutputFloat(poti_path, poti_sk_path, new SKMetadata("ratio", "Throttle Level")));
 
-  ConfigItem(di2_sk_output)
-      ->set_title("Digital Input 2 SK Output Path")
-      ->set_sort_order(200);
 
-  digital_input2->connect_to(di2_sk_output);
+
+  ////////////////LEDs////////////////
+  // STD BUTTON LED
+  // Define the SK Path of the device that controls the load that this
+  // switch should control remotely.  Clicking the virtual switch will
+  // send a PUT request on this path to the main device. This virtual
+  // switch will also subscribe to this path, and will set its state
+  // internally to match any value reported on this path.
+  // To find valid Signal K Paths that fits your need you look at this link:
+  // https://signalk.org/specification/1.4.0/doc/vesselsBranch.html
+  const char* sk_path = "electrical.switches.lights.engineroom.state";
+
+  // "Configuration paths" are combined with "/config" to formulate a URL
+  // used by the RESTful API for retrieving or setting configuration data.
+  // It is ALSO used to specify a path to the SPIFFS file system
+  // where configuration data is saved on the MCU board.  It should
+  // ALWAYS start with a forward slash if specified.  If left blank,
+  // that indicates a sensor or transform does not have any
+  // configuration to save.
+  const char* config_path_button_c = "/button/clicktime";
+  const char* config_path_status_light = "/button/statusLight";
+  const char* config_path_sk_output = "/signalk/path";
+  const char* config_path_repeat = "/signalk/repeat";
+
+  // An led that represents the current state of the switch.
+  auto* led = new RgbLed(STD_LED_R_PIN, STD_LED_G_PIN, STD_LED_B_PIN,
+                         config_path_status_light, LED_ON_COLOR, LED_OFF_COLOR);
+
+  // Create a switch controller to handle the user press logic and
+  // connect it a server PUT request...
+  SmartSwitchController* controller = new SmartSwitchController(false);
+  controller->connect_to(new BoolSKPutRequest(sk_path));
+
+  // Also connect the controller to an onboard LED...
+  controller->connect_to(led->on_off_consumer_);
+
+  // Connect a physical button that will feed manual click types into the
+  // controller...
+  DigitalInputState* btn = new DigitalInputState(STDBUTTON_PIN, INPUT, 100);
+  PressRepeater* pr = new PressRepeater();
+  btn->connect_to(pr);
+
+  auto click_type = new ClickType(config_path_button_c);
+
+  ConfigItem(click_type)->set_title("Click Type")->set_sort_order(1000);
+
+  pr->connect_to(click_type)->connect_to(controller->click_consumer_);
+
+  // In addition to the manual button "click types", a
+  // SmartSwitchController accepts explicit state settings via
+  // any boolean producer or various "truth" values in human readable
+  // format via a String producer.
+  // Since this device is NOT the device that directly controls the
+  // load, we don't want to respond to PUT requests. Instead, we
+  // let the "real" switch respond to the PUT requests, and
+  // here we just listen to the published values that are
+  // sent across the Signal K network when the controlling device
+  // confirms it has made the change in state.
+  auto* sk_listener = new SKValueListener<bool>(sk_path);
+  sk_listener->connect_to(controller->swich_consumer_);
 
   // To avoid garbage collecting all shared pointers created in setup(),
   // loop from here.
